@@ -1,4 +1,4 @@
-# Media Extractor — Chrome Extension
+# pluck
 
 > Extract images, GIFs, and videos from DOCX, PPTX, and PDF files directly in your browser. 100% client-side — no uploads, no server, complete privacy.
 
