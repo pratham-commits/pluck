@@ -64,16 +64,6 @@ extension/
 ```
 
 ---
-
-## Limitations (v1)
-
-- PDF extraction is render-based (page-as-image), not binary XObject extraction
-- Single file processing only (no batch)
-- No cloud sync or history
-- Chrome only (no Firefox/Safari support)
-
----
-
 ## License
 
 MIT
