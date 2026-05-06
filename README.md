@@ -45,19 +45,6 @@
 5. Click **Download selected** or **Download all ZIP**
 
 ---
-
-## Bundled Libraries
-
-| Library | Version | Purpose |
-|---------|---------|---------|
-| [JSZip](https://stuk.github.io/jszip/) | 3.10.1 | DOCX/PPTX unpacking + ZIP packaging |
-| [pdf.js](https://mozilla.github.io/pdf.js/) | 3.11.174 | PDF page rendering |
-| [FileSaver.js](https://github.com/nicnacnic/FileSaver.js) | 2.0.5 | Browser download trigger |
-
-All libraries are bundled locally inside `extension/libs/` — no CDN requests.
-
----
-
 ## Project Structure
 
 ```
