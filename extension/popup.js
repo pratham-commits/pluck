@@ -511,9 +511,23 @@
 
   async function downloadAsZip(items, zipName) {
     const zip = new JSZip();
+
+    const imageExts = ['png','jpg','jpeg','gif','webp','bmp','tiff','tif','svg','ico','emf','wmf'];
+    const videoExts = ['mp4','mov','avi','webm','mkv','wmv','flv','m4v'];
+
     items.forEach(item => {
-      zip.file(item.name, item.blob);
+      const ext = getExtension(item.name);
+      let folder;
+      if (imageExts.includes(ext)) {
+        folder = 'images';
+      } else if (videoExts.includes(ext)) {
+        folder = 'videos';
+      } else {
+        folder = 'other';
+      }
+      zip.file(`${folder}/${item.name}`, item.blob);
     });
+
     const content = await zip.generateAsync({ type: 'blob' });
     saveAs(content, zipName);
   }
