@@ -270,7 +270,7 @@
     return results;
   }
 
-  // ── PDF Extraction ───────────────────────────────────
+  // ── PDF Extraction (true image XObject extraction) ───
   async function extractFromPDF(arrayBuffer) {
     const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
     const numPages = pdf.numPages;
@@ -278,31 +278,178 @@
     if (numPages === 0) throw new Error('PDF has 0 pages.');
 
     const results = [];
-    const scale = 2.0; // Retina quality
+    const seenImages = new Set();
+    let imageIndex = 0;
+
+    const OPS = pdfjsLib.OPS;
 
     for (let i = 1; i <= numPages; i++) {
-      showProgress(`Extracting… page ${i} of ${numPages}`);
+      showProgress(`Scanning page ${i} of ${numPages}…`);
 
       const page = await pdf.getPage(i);
-      const viewport = page.getViewport({ scale });
 
+      // Render at scale 1 to force pdf.js to decode all image XObjects
+      // and populate page.objs with decoded pixel data
+      const viewport = page.getViewport({ scale: 1 });
       const canvas = document.createElement('canvas');
       canvas.width = viewport.width;
       canvas.height = viewport.height;
       const ctx = canvas.getContext('2d');
-
       await page.render({ canvasContext: ctx, viewport }).promise;
 
-      const blob = await new Promise((resolve, reject) => {
-        canvas.toBlob(b => {
-          if (b) resolve(b);
-          else reject(new Error(`Failed to render page ${i}`));
-        }, 'image/png');
-      });
+      // Walk the operator list to find image painting operations
+      const ops = await page.getOperatorList();
 
-      const url = URL.createObjectURL(blob);
-      const name = `page-${String(i).padStart(String(numPages).length, '0')}.png`;
-      results.push({ name, blob, url, type: 'image/png' });
+      for (let j = 0; j < ops.fnArray.length; j++) {
+        const fn = ops.fnArray[j];
+
+        if (fn !== OPS.paintImageXObject &&
+            fn !== OPS.paintImageXObjectRepeat) {
+          continue;
+        }
+
+        const imgName = ops.argsArray[j][0];
+        if (seenImages.has(imgName)) continue;
+        seenImages.add(imgName);
+
+        try {
+          const imgData = page.objs.get(imgName);
+          if (!imgData) continue;
+
+          const imgCanvas = document.createElement('canvas');
+          const imgCtx = imgCanvas.getContext('2d');
+          let w = 0, h = 0;
+
+          // Determine the drawable source from the various formats pdf.js may return
+          const bitmap = imgData instanceof ImageBitmap ? imgData
+                       : (imgData.bitmap instanceof ImageBitmap ? imgData.bitmap : null);
+
+          if (bitmap) {
+            // ImageBitmap (direct or wrapped in { width, height, bitmap })
+            w = bitmap.width;
+            h = bitmap.height;
+            imgCanvas.width = w;
+            imgCanvas.height = h;
+            imgCtx.drawImage(bitmap, 0, 0);
+
+          } else if (imgData.data && imgData.width && imgData.height) {
+            // Raw pixel data with .kind indicator
+            w = imgData.width;
+            h = imgData.height;
+            imgCanvas.width = w;
+            imgCanvas.height = h;
+
+            let imageData;
+            const kind = imgData.kind; // 1=GRAY_1BPP, 2=RGB_24BPP, 3=RGBA_32BPP
+
+            if (kind === 1) {
+              // 1-bit grayscale — expand to RGBA
+              const rgba = new Uint8ClampedArray(w * h * 4);
+              const src = imgData.data;
+              let di = 0;
+              for (let bi = 0; bi < src.length && di < rgba.length; bi++) {
+                const byte = src[bi];
+                for (let bit = 7; bit >= 0 && di < rgba.length; bit--) {
+                  const val = ((byte >> bit) & 1) ? 0 : 255;
+                  rgba[di++] = val;
+                  rgba[di++] = val;
+                  rgba[di++] = val;
+                  rgba[di++] = 255;
+                }
+              }
+              imageData = new ImageData(rgba, w, h);
+
+            } else if (kind === 2) {
+              // RGB 24-bit — expand to RGBA
+              const rgba = new Uint8ClampedArray(w * h * 4);
+              const src = imgData.data;
+              for (let s = 0, d = 0; s < src.length; s += 3, d += 4) {
+                rgba[d]     = src[s];
+                rgba[d + 1] = src[s + 1];
+                rgba[d + 2] = src[s + 2];
+                rgba[d + 3] = 255;
+              }
+              imageData = new ImageData(rgba, w, h);
+
+            } else if (kind === 3) {
+              // RGBA 32-bit — use directly
+              imageData = new ImageData(
+                new Uint8ClampedArray(imgData.data.buffer,
+                  imgData.data.byteOffset, imgData.data.byteLength),
+                w, h
+              );
+            } else {
+              // Unknown kind — try treating data as RGBA
+              try {
+                imageData = new ImageData(
+                  new Uint8ClampedArray(imgData.data.buffer,
+                    imgData.data.byteOffset, imgData.data.byteLength),
+                  w, h
+                );
+              } catch (_) {
+                continue;
+              }
+            }
+
+            if (imageData) {
+              imgCtx.putImageData(imageData, 0, 0);
+            } else {
+              continue;
+            }
+
+          } else {
+            // Unknown format — skip
+            console.info(`Skipping image "${imgName}" — unrecognized format:`, typeof imgData, Object.keys(imgData || {}));
+            continue;
+          }
+
+          // Skip tiny images (icons, decorative dots, masks, etc.)
+          if (w < 10 || h < 10) continue;
+
+          const blob = await new Promise(resolve => {
+            imgCanvas.toBlob(b => resolve(b), 'image/png');
+          });
+
+          if (blob && blob.size > 100) {
+            imageIndex++;
+            const url = URL.createObjectURL(blob);
+            results.push({
+              name: `image-${imageIndex}.png`,
+              blob, url, type: 'image/png'
+            });
+            showProgress(`Found ${results.length} image${results.length !== 1 ? 's' : ''}… (page ${i} of ${numPages})`);
+          }
+        } catch (e) {
+          console.warn(`Could not extract image "${imgName}" from page ${i}:`, e);
+        }
+      }
+
+      page.cleanup();
+    }
+
+    // Fallback: if no embedded images found, render pages as images
+    if (results.length === 0) {
+      const scale = 2.0;
+      for (let i = 1; i <= numPages; i++) {
+        showProgress(`No embedded images found. Rendering page ${i} of ${numPages}…`);
+        const page = await pdf.getPage(i);
+        const viewport = page.getViewport({ scale });
+        const canvas = document.createElement('canvas');
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        const ctx = canvas.getContext('2d');
+        await page.render({ canvasContext: ctx, viewport }).promise;
+
+        const blob = await new Promise(resolve => {
+          canvas.toBlob(b => resolve(b), 'image/png');
+        });
+
+        if (blob) {
+          const url = URL.createObjectURL(blob);
+          const name = `page-${String(i).padStart(String(numPages).length, '0')}.png`;
+          results.push({ name, blob, url, type: 'image/png' });
+        }
+      }
     }
 
     return results;
